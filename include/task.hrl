@@ -11,6 +11,8 @@
 -ifndef(task).
 -define(task, true).
 
+-record(task, {
 
+}).
 
 -endif. %% task
