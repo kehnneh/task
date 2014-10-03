@@ -1,0 +1,20 @@
+%%%-------------------------------------------------------------------
+%%% @author kehnneh
+%%% @copyright (C) 2014, <COMPANY>
+%%% @doc
+%%%
+%%% @end
+%%% Created : 02. Oct 2014 8:41 PM
+%%%-------------------------------------------------------------------
+{application, task, [
+    {description, ""},
+    {vsn, "0.1"},
+    {registered, []},
+    {applications, [
+        kernel,
+        stdlib,
+        lager
+    ]},
+    {mod, {task_app, []}},
+    {env, []}
+]}.
