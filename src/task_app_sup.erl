@@ -50,7 +50,8 @@ start_link() ->
 %% @end
 %%--------------------------------------------------------------------
 -spec init(Args :: term()) ->
-    {ok, {SupFlags :: {RestartStrategy :: supervisor:strategy(), MaxR :: non_neg_integer(), MaxT :: non_neg_integer()}, [ChildSpec :: supervisor:child_spec()]}} |    ignore |
+    {ok, {SupFlags :: {RestartStrategy :: supervisor:strategy(), MaxR :: non_neg_integer(), MaxT :: non_neg_integer()}, [ChildSpec :: supervisor:child_spec()]}} |
+    ignore |
     {error, Reason :: term()}.
 
 init([]) ->

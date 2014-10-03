@@ -9,4 +9,5 @@ rel/example_project
 .concrete/DEV_MODE
 .rebar
 rel/task
+.idea/workspace.xml
 
