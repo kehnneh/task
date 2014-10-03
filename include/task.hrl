@@ -12,7 +12,9 @@
 -define(task, true).
 
 -record(task, {
-
+    id :: term(),
+    opaque :: term(),
+    caller :: pid()
 }).
 
 -endif. %% task

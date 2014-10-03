@@ -9,6 +9,7 @@
 -module(task_pool).
 -author("kehnneh").
 -include("task_pool.hrl").
+-include("task.hrl").
 -behaviour(gen_server).
 
 %% API
@@ -106,16 +107,20 @@ init(#pool_cfg{id = Id, sup = Sup, maxws = MaxWs}) ->
     {stop, Reason :: term(), Reply :: term(), NewState :: #state{}} |
     {stop, Reason :: term(), NewState :: #state{}}.
 
-handle_call(#taskreq{id = Id, opaque = Opaque}, {Pid, _Tag}, #state{maxws = MaxWs, ws = Ws} = State)
-    when MaxWs > Ws ->
+handle_call(#taskreq{id = Id, opaque = Opaque}, {Pid, _Tag}, #state{maxws = MaxWs, ws = Ws, runq = RunQ} = State) ->
     #state{ets = Ets, sup = Sup} = State,
     case ets:lookup(Ets, Id) of
         [] ->
             Task = #task{id = Id, opaque = Opaque, caller = Pid},
             ets:insert(Ets, Task),
-            {ok, Child} = supervisor:start_child(Sup, [{Ets, Id}]),
-            erlang:monitor(process, Child),
-            {reply, {ok, Id}, State#state{ws = Ws + 1}};
+            case MaxWs > Ws of
+                true ->
+                    {ok, Child} = supervisor:start_child(Sup, [{Ets, Id}]),
+                    erlang:monitor(process, Child),
+                    {reply, {ok, Id}, State#state{ws = Ws + 1}};
+                false ->
+                    {reply, {ok, Id}, State#state{runq = RunQ + 1}}
+            end;
         [#task{}] ->
             {reply, {error, eexist}, State}
     end;
