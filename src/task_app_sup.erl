@@ -60,14 +60,16 @@ init([]) ->
 
     SupFlags = {RestartStrategy, MaxRestarts, MaxSecondsBetweenRestarts},
 
-    Restart = permanent,
-    Shutdown = 2000,
-    Type = worker,
+    TableServer = {
+        task_table_server,
+        {task_table_server, start_link, []},
+        permanent,
+        infinity,
+        worker,
+        [task_table_server]
+    },
 
-    _ = {'AName', {'AModule', start_link, []},
-        Restart, Shutdown, Type, ['AModule']},
-
-    {ok, {SupFlags, []}}.
+    {ok, {SupFlags, [TableServer]}}.
 
 %%%===================================================================
 %%% Internal functions
