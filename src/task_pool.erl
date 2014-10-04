@@ -92,6 +92,7 @@ init(#pool_cfg{id = Id, sup = Sup, maxws = MaxWs}) ->
     F = fun(#task{state = queued}, {RunQ, Ws}) ->
         {RunQ + 1, Ws};
     (#task{state = Pid}, {RunQ, Ws}) when is_pid(Pid) ->
+        erlang:monitor(process, Pid),
         {RunQ, Ws + 1};
     (#task{}, Acc) ->
         Acc;
