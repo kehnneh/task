@@ -14,7 +14,8 @@
 -record(task, {
     id :: term(),
     opaque :: term(),
-    caller :: pid()
+    caller :: pid(),
+    state :: queued | pid() | done
 }).
 
 -endif. %% task
