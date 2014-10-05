@@ -14,6 +14,7 @@
 -record(task, {
     id :: term(),
     opaque :: term(),
+    callback :: fun((term()) -> {ok | continue | error, term()}),
     caller :: pid(),
     state :: queued | pid() | done
 }).

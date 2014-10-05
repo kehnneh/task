@@ -8,11 +8,15 @@
 %%%-------------------------------------------------------------------
 -module(task).
 -author("kehnneh").
-
+-include("task.hrl").
 -behaviour(gen_server).
 
+-compile([{parse_transform, lager_transform}]).
+
 %% API
--export([start_link/0]).
+-export([
+    start_link/1
+]).
 
 %% gen_server callbacks
 -export([
@@ -24,7 +28,13 @@
     code_change/3
 ]).
 
--record(state, {}).
+-record(state, {
+    ets :: ets:tid(),
+    id :: term(),
+    opaque :: term(),
+    callback :: fun((term()) -> {ok | continue | error, term()}),
+    caller :: pid()
+}).
 
 %%%===================================================================
 %%% API
@@ -36,13 +46,13 @@
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec start_link() ->
+-spec start_link(Args :: term()) ->
     {ok, Pid :: pid()} |
     ignore |
     {error, Reason :: term()}.
 
-start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+start_link(Args) ->
+    gen_server:start_link(?MODULE, Args, []).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -65,8 +75,11 @@ start_link() ->
     {stop, Reason :: term()} |
     ignore.
 
-init([]) ->
-    {ok, #state{}}.
+init({Ets, Id}) ->
+    [#task{opaque = Opaque, callback = Callback, caller = Pid}] = ets:lookup(Ets, Id),
+    ets:update_element(Ets, Id, {#task.state, self()}),
+    gen_server:cast(self(), continue),
+    {ok, #state{ets = Ets, id = Id, opaque = Opaque, callback = Callback, caller = Pid}, 0}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -98,6 +111,21 @@ handle_call(_Request, _From, State) ->
     {noreply, NewState :: #state{}, timeout() | hibernate} |
     {stop, Reason :: term(), NewState :: #state{}}.
 
+handle_cast(continue, #state{ets = Ets, id = Id, opaque = Opaque, callback = F, caller = Pid} = State) ->
+    case catch F(Opaque) of
+        {ok, NewOpaque} ->
+            ets:update_element(Ets, Id, {#task.state, done}),
+            Pid ! {Id, NewOpaque},
+            {stop, normal, State#state{opaque = NewOpaque}};
+        {continnue, NewOpaque} ->
+            gen_server:cast(self(), continue),
+            {noreply, State#state{opaque = NewOpaque}};
+        Error ->
+            lager:warning("task ~p couldn't complete: ~p", [Id, Error]),
+            ets:update_element(Ets, Id, {#task.state, done}),
+            Pid ! {Id, Error},
+            {stop, normal, State}
+    end;
 handle_cast(_Request, State) ->
     {noreply, State}.
 
@@ -133,8 +161,8 @@ handle_info(_Info, State) ->
 -spec terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()), State :: #state{}) ->
     term().
 
-terminate(_Reason, _State) ->
-    ok.
+terminate(_Reason, #state{ets = Ets, id = Id}) ->
+    ets:update_element(Ets, Id, {#task.state, done}).
 
 %%--------------------------------------------------------------------
 %% @private

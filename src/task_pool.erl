@@ -16,7 +16,8 @@
 
 %% API
 -export([
-    start_link/1
+    start_link/1,
+    add/4
 ]).
 
 %% gen_server callbacks
@@ -31,7 +32,8 @@
 
 -record(taskreq, {
     id :: term(),
-    opaque :: term()
+    opaque :: term(),
+    callback :: fun((term()) -> {ok | continue | error, term()})
 }).
 
 -record(state, {
@@ -68,6 +70,9 @@
 start_link(#pool_cfg{} = Config) ->
     gen_server:start_link(?MODULE, Config#pool_cfg{sup = self()}, []).
 
+add(Pid, Id, Opaque, Fun) ->
+    gen_server:call(Pid, #taskreq{id = Id, opaque = Opaque, callback = Fun}, infinity).
+
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -90,20 +95,8 @@ start_link(#pool_cfg{} = Config) ->
     ignore.
 
 init(#pool_cfg{id = Id, sup = Sup, maxws = MaxWs}) ->
+    gen_server:cast(self(), {init, Sup}),
     {ok, Ets} = task_table_server:acquire_table(Id, [public, set, {keypos, #task.id}]),
-    F = fun(#task{state = queued}, {RunQ, Ws}) ->
-        {RunQ + 1, Ws};
-    (#task{state = Pid}, {RunQ, Ws}) when is_pid(Pid) ->
-        erlang:monitor(process, Pid),
-        {RunQ, Ws + 1};
-    (#task{}, Acc) ->
-        Acc;
-    (Entry, Acc) ->
-        lager:warning("Found ~p in task pool table ~p", [Entry, Id]),
-        Acc
-    end,
-    ets:foldl(F, {0, 0}, Ets),
-    gen_server:cast(self(), {init_sup, Sup}),
     {ok, #state{id = Id, ets = Ets, maxws = MaxWs}}.
 
 %%--------------------------------------------------------------------
@@ -121,16 +114,15 @@ init(#pool_cfg{id = Id, sup = Sup, maxws = MaxWs}) ->
     {stop, Reason :: term(), Reply :: term(), NewState :: #state{}} |
     {stop, Reason :: term(), NewState :: #state{}}.
 
-handle_call(#taskreq{id = Id, opaque = Opaque}, {Pid, _Tag}, #state{maxws = MaxWs, ws = Ws, runq = RunQ} = State) ->
+handle_call(#taskreq{id = Id, callback = F, opaque = Opaque}, {Pid, _Tag}, #state{maxws = MaxWs, ws = Ws, runq = RunQ} = State) ->
     #state{ets = Ets, sup = Sup} = State,
     case ets:lookup(Ets, Id) of
         [] ->
-            Task = #task{id = Id, opaque = Opaque, caller = Pid},
+            Task = #task{id = Id, callback = F, opaque = Opaque, caller = Pid, state = queued},
             ets:insert(Ets, Task),
             case MaxWs > Ws of
                 true ->
-                    {ok, Child} = supervisor:start_child(Sup, [{Ets, Id}]),
-                    erlang:monitor(process, Child),
+                    start_task(Sup, Ets, Id),
                     {reply, {ok, Id}, State#state{ws = Ws + 1}};
                 false ->
                     {reply, {ok, Id}, State#state{runq = RunQ + 1}}
@@ -153,18 +145,33 @@ handle_call(_Request, _From, State) ->
     {noreply, NewState :: #state{}, timeout() | hibernate} |
     {stop, Reason :: term(), NewState :: #state{}}.
 
-handle_cast({init_sup, Parent}, #state{id = Id} = State) ->
-    ChildSpec = {Id, {task_sup, start_link, []}, transient, infinity, supervisor, [task_sup]},
-    case supervisor:start_child(Parent, ChildSpec) of
-        {ok, Child} ->
-            lager:debug("pool ~p started task supervisor", [Id]),
-            {noreply, State#state{sup = Child}};
-        {error, {already_started, Child}} ->
-            lager:debug("pool ~p acquired running task supervisor", [Id]),
-            {noreply, State#state{sup = Child}};
-        Error ->
-            {stop, Error, State}
-    end;
+handle_cast({init, Parent}, #state{id = Id, ets = Ets} = State) ->
+    %% This clause must only be entered as a result of init/1
+
+    %% Acquire task process supervisor
+    ChildSpec = {erlang:phash2(Id), {task_sup, start_link, []}, transient, infinity, supervisor, [task_sup]},
+    Child = case supervisor:start_child(Parent, ChildSpec) of
+                {ok, Pid} ->
+                    Pid;
+                {error, {already_started, Pid}} ->
+                    Pid
+            end,
+
+    %% Scan task table and calibrate our working set and queued counts
+    F = fun(#task{state = queued}, {RunQ, Ws}) ->
+        {RunQ + 1, Ws};
+    (#task{state = P}, {RunQ, Ws}) when is_pid(P) ->
+        erlang:monitor(process, P),
+        {RunQ, Ws + 1};
+    (#task{}, Acc) ->
+        Acc;
+    (Entry, Acc) ->
+        lager:warning("Found ~p in task pool table ~p", [Entry, Id]),
+        Acc
+    end,
+    {RunQ, Ws} = ets:foldl(F, {0, 0}, Ets),
+
+    {noreply, State#state{sup = Child, ws = Ws, runq = RunQ}};
 handle_cast(_Request, State) ->
     {noreply, State}.
 
@@ -192,12 +199,11 @@ handle_info({'DOWN', _Ref, _Type, _Pid, _Reason}, State) ->
     } = State,
     case RunQ > 0 of
         true ->
-            case ets:match(Ets, #task{id = '_', opaque = '_', caller = '_'}, 1) of
+            case ets:match_object(Ets, #task{id = '_', opaque = '_', callback = '_', caller = '_', state = queued}, 1) of
                 '$end_of_table' ->
                     ok;
                 {[#task{id = Id}], _Continuation} ->
-                    {ok, Child} = supervisor:start_child(Sup, [Ets, Id]),
-                    erlang:monitor(process, Child)
+                    start_task(Sup, Ets, Id)
             end,
             {noreply, State#state{runq = RunQ - 1}};
         false ->
@@ -243,3 +249,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+start_task(Sup, Ets, Id) ->
+    {ok, Pid} = supervisor:start_child(Sup, [{Ets, Id}]),
+    erlang:monitor(process, Pid).

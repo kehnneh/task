@@ -17,7 +17,7 @@
     %% the user of pool_cfg is typically a
     %% supervisor, the task supervisor for this
     %% pool will be a child of it
-    sup = self() :: pid(),
+    sup :: pid(),
     maxws = 1000 :: non_neg_integer()
 }).
 
