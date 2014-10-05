@@ -75,7 +75,7 @@ test(Config) ->
         lager:info("~p: hi!", [TaskId]),
         {ok, Term}
     end,
-    {ok, TaskId} = task_pool:add(Pool, TaskId, Opaque, F),
+    {ok, TaskId} = task_pool:run(Pool, TaskId, Opaque, F),
     exit(Pool, kill),
     receive
         {TaskId, Result} ->

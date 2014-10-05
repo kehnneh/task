@@ -17,7 +17,8 @@
 %% API
 -export([
     start_link/1,
-    add/4
+    run/4,
+    stop/2
 ]).
 
 %% gen_server callbacks
@@ -31,25 +32,29 @@
 ]).
 
 -record(taskreq, {
-    id :: term(),
-    opaque :: term(),
-    callback :: fun((term()) -> {ok | continue | error, term()})
+    id          :: term(),
+    opaque      :: term(),
+    callback    :: fun((term()) -> {ok | continue | error, term()})
+}).
+
+-record(taskstopreq, {
+    id          :: term()
 }).
 
 -record(state, {
     %% The pool id is also the table id!
-    id :: term(),
-    ets :: ets:tid(),
+    id          :: term(),
+    ets         :: ets:tid(),
 
     %% supervisor
-    sup :: pid(),
+    sup         :: pid(),
 
     %% working set
-    maxws :: non_neg_integer(),
-    ws = 0 :: non_neg_integer(),
+    maxws       :: non_neg_integer(),
+    ws      = 0 :: non_neg_integer(),
 
     %% run queue
-    runq :: non_neg_integer()
+    runq        :: non_neg_integer()
 }).
 
 %%%===================================================================
@@ -70,8 +75,11 @@
 start_link(#pool_cfg{} = Config) ->
     gen_server:start_link(?MODULE, Config#pool_cfg{sup = self()}, []).
 
-add(Pid, Id, Opaque, Fun) ->
+run(Pid, Id, Opaque, Fun) ->
     gen_server:call(Pid, #taskreq{id = Id, opaque = Opaque, callback = Fun}, infinity).
+
+stop(Pid, Id) ->
+    gen_server:call(Pid, #taskstopreq{id = Id}, infinity).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -129,6 +137,24 @@ handle_call(#taskreq{id = Id, callback = F, opaque = Opaque}, {Pid, _Tag}, #stat
             end;
         [#task{}] ->
             {reply, {error, eexist}, State}
+    end;
+handle_call(#taskstopreq{id = Id}, _From, #state{ets = Ets, sup = Sup} = State) ->
+    case ets:lookup(Ets, Id) of
+        [] ->
+            {reply, {error, enoent}, State};
+        [#task{state = Pid}] when is_pid(Pid) ->
+            %% Stop the process and remove its ets entry
+            case supervisor:terminate_child(Sup, Id) of
+                ok ->
+                    ets:delete(Ets, Id);
+                _Error ->
+                    ok
+            end,
+            {reply, ok, State};
+        [#task{caller = Pid, state = queued}] ->
+            ets:delete(Ets, Id),
+            Pid ! {Id, canceled},
+            {reply, ok, State}
     end;
 handle_call(_Request, _From, State) ->
     {reply, {error, einval}, State}.
@@ -191,12 +217,7 @@ handle_cast(_Request, State) ->
     {stop, Reason :: term(), NewState :: #state{}}.
 
 handle_info({'DOWN', _Ref, _Type, _Pid, _Reason}, State) ->
-    #state{
-        ets = Ets,
-        sup = Sup,
-        ws = Ws,
-        runq = RunQ
-    } = State,
+    #state{ets = Ets, sup = Sup, ws = Ws, runq = RunQ} = State,
     case RunQ > 0 of
         true ->
             case ets:match_object(Ets, #task{id = '_', opaque = '_', callback = '_', caller = '_', state = queued}, 1) of

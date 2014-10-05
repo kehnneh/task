@@ -30,19 +30,19 @@
 ]).
 
 -record(table, {
-    id = undefined :: term(),
-    ets = undefined :: ets:tid(),
-    args = [] :: [term()],
-    owner = undefined :: pid()
+    id      = undefined :: term(),
+    ets     = undefined :: ets:tid(),
+    args    = []        :: [term()],
+    owner   = undefined :: pid()
 }).
 
 -record(tablereq, {
-    id = undefined :: term(),
-    args = [] :: [term()]
+    id      = undefined :: term(),
+    args    = []        :: [term()]
 }).
 
 -record(state, {
-    ets = undefined :: ets:tid()
+    ets     = undefined :: ets:tid()
 }).
 
 %%%===================================================================
@@ -190,11 +190,9 @@ handle_cast(_Request, State) ->
 handle_info({'ETS-TRANSFER', Tab, _FromPid, Id}, #state{ets = Ets} = State) ->
     case ets:info(Tab, size) of
         0 ->
-            %% If the table is empty, delete it
             ets:delete(Tab),
             ets:delete(Ets, Id);
         _ ->
-            %% Otherwise hang on to it
             ets:update_element(Ets, Id, {#table.owner, self()})
     end,
     {noreply, State};
