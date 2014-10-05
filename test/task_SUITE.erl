@@ -48,6 +48,7 @@ end_per_suite(_Config) ->
     ok = application:stop(compiler).
 
 init_per_group(_, Config) ->
+    lager:set_loglevel(lager_console_backend, debug),
     Id = make_ref(),
     Sup = whereis(task_app_sup),
     PoolCfg = #pool_cfg{id = Id, sup = Sup, maxws = 3},
