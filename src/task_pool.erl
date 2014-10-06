@@ -144,6 +144,7 @@ init(#pool_cfg{id = Id, sup = Sup, maxws = MaxWs}) ->
     {stop, Reason :: term(), NewState :: #state{}}.
 
 handle_call(#taskreq{} = Req, From, #state{sup = undefined} = State) ->
+    %% We haven't initialized yet, send ourselves a message to do this again
     self() ! {'$gen_call', From, Req},
     {noreply, State};
 handle_call(#taskreq{id = Id, callback = F, opaque = Opaque}, {Pid, _Tag}, #state{maxws = MaxWs, ws = Ws, runq = RunQ} = State) ->
