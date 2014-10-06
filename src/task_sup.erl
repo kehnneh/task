@@ -56,12 +56,12 @@ start_link() ->
 
 init([]) ->
     RestartStrategy = simple_one_for_one,
-    MaxRestarts = 1000,
-    MaxSecondsBetweenRestarts = 3600,
+    MaxRestarts = 1,
+    MaxSecondsBetweenRestarts = 5,
 
     SupFlags = {RestartStrategy, MaxRestarts, MaxSecondsBetweenRestarts},
 
-    Child = {task, {task, start_link, []}, temporary, brutal_kill, worker, [task]},
+    Child = {task, {task, start_link, []}, temporary, timer:seconds(10), worker, [task]},
 
     {ok, {SupFlags, [Child]}}.
 

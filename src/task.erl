@@ -76,9 +76,11 @@ start_link(Args) ->
     ignore.
 
 init({Ets, Id}) ->
+    false = erlang:process_flag(trap_exit, true),
     [#task{opaque = Opaque, callback = Callback, caller = Pid}] = ets:lookup(Ets, Id),
     ets:update_element(Ets, Id, {#task.state, self()}),
     gen_server:cast(self(), continue),
+    lager:debug("Task ~p initiated", [Id]),
     {ok, #state{ets = Ets, id = Id, opaque = Opaque, callback = Callback, caller = Pid}, 0}.
 
 %%--------------------------------------------------------------------
@@ -111,20 +113,16 @@ handle_call(_Request, _From, State) ->
     {noreply, NewState :: #state{}, timeout() | hibernate} |
     {stop, Reason :: term(), NewState :: #state{}}.
 
-handle_cast(continue, #state{ets = Ets, id = Id, opaque = Opaque, callback = F, caller = Pid} = State) ->
+handle_cast(continue, #state{id = Id, opaque = Opaque, callback = F} = State) ->
+    lager:debug("task ~p progressing", [Id]),
     case catch F(Opaque) of
         {ok, NewOpaque} ->
-            ets:update_element(Ets, Id, {#task.state, done}),
-            Pid ! {Id, NewOpaque},
-            {stop, normal, State#state{opaque = NewOpaque}};
-        {continnue, NewOpaque} ->
+            {stop, normal, State#state{opaque = {ok, NewOpaque}}};
+        {continue, NewOpaque} ->
             gen_server:cast(self(), continue),
             {noreply, State#state{opaque = NewOpaque}};
         Error ->
-            lager:warning("task ~p couldn't complete: ~p", [Id, Error]),
-            ets:update_element(Ets, Id, {#task.state, done}),
-            Pid ! {Id, Error},
-            {stop, normal, State}
+            {stop, normal, State#state{opaque = Error}}
     end;
 handle_cast(_Request, State) ->
     {noreply, State}.
@@ -161,8 +159,16 @@ handle_info(_Info, State) ->
 -spec terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()), State :: #state{}) ->
     term().
 
-terminate(_Reason, #state{ets = Ets, id = Id}) ->
-    ets:update_element(Ets, Id, {#task.state, done}).
+terminate(shutdown, State) ->
+    terminate(normal, State#state{opaque = shutdown});
+terminate(Reason, #state{ets = Ets, id = Id, caller = Pid, opaque = Opaque}) ->
+    lager:debug("Task ~p shutdown: ~p", [Id, Reason]),
+    case deliver(Pid, {Id, Opaque}) of
+        ok ->
+            ets:delete(Ets, Id);
+        noconnect ->
+            ets:update_element(Ets, Id, [{#task.state, done}])
+    end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -182,3 +188,14 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+deliver(Pid, Msg) ->
+    try erlang:monitor(process, Pid) of
+        Mref ->
+            Ret = (catch erlang:send(Pid, Msg, [noconnect])),
+            erlang:demonitor(Mref, [flush]),
+            Ret
+    catch
+        error:_ ->
+            noconnect
+    end.

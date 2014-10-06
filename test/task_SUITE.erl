@@ -21,16 +21,20 @@
     init_per_suite/1, end_per_suite/1,
     init_per_group/2, end_per_group/2,
     init_per_testcase/2, end_per_testcase/2,
-    test/1
+    task_kill_pool/1,
+    task_stop_normal/1
 ]).
 
 all() ->
-    [{group, batch}].
+    [{group, master}].
 
 groups() ->
-    [{batch,
+    [{master,
+      [parallel, {repeat, 2}],
+      [{group, batch}]},
+     {batch,
       [parallel],
-      [test]}].
+      [task_stop_normal, task_kill_pool, task_kill_pool, task_stop_normal]}].
 
 init_per_suite(Config) ->
     ok = application:start(compiler),
@@ -38,6 +42,10 @@ init_per_suite(Config) ->
     ok = application:start(goldrush),
     ok = application:start(lager),
     ok = application:start(task),
+    lager:set_loglevel(lager_console_backend, debug),
+    Sup = whereis(task_app_sup),
+    ChildSpec = {task_pool_test, {task_pool_test, start_link, []}, transient, infinity, worker, [task_pool]},
+    {ok, _Pid} = supervisor:start_child(Sup, ChildSpec),
     Config.
 
 end_per_suite(_Config) ->
@@ -48,36 +56,59 @@ end_per_suite(_Config) ->
     ok = application:stop(compiler).
 
 init_per_group(_, Config) ->
-    lager:set_loglevel(lager_console_backend, debug),
-    Id = make_ref(),
-    Sup = whereis(task_app_sup),
-    PoolCfg = #pool_cfg{id = Id, sup = Sup, maxws = 3},
-    ChildSpec = {Id, {task_pool, start_link, [PoolCfg]}, transient, infinity, worker, [task_pool]},
-    {ok, Pid} = supervisor:start_child(Sup, ChildSpec),
-    [{pool, Pid}] ++ Config.
+    Config.
 
 end_per_group(_, _Config) ->
     ok.
 
 init_per_testcase(_, Config) ->
-    Config.
+    TaskId = make_ref(),
+    [{taskid, TaskId}] ++ Config.
 
 end_per_testcase(_, _Config) ->
     ok.
 
-test(Config) ->
-    Pool = ?config(pool, Config),
-    TaskId = make_ref(),
-    Opaque = ok,
+%% 1) Create a task
+%% 2) Kill the task's pool server
+%% 3) Obtain success
+task_kill_pool(Config) ->
+    TaskId = ?config(taskid, Config),
+    Opaque = [],
     F = fun(Term) ->
-        lager:info("~p: bye!", [TaskId]),
-        timer:sleep(timer:seconds(10)),
-        lager:info("~p: hi!", [TaskId]),
+        lager:info("~p: sleeping!", [TaskId]),
+        timer:sleep(timer:seconds(1)),
+        lager:info("~p: woke up!", [TaskId]),
         {ok, Term}
     end,
-    {ok, TaskId} = task_pool:run(Pool, TaskId, Opaque, F),
-    exit(Pool, kill),
+    {ok, TaskId} = task_pool_test:run(TaskId, Opaque, F),
+    case whereis(task_pool_test) of
+        Pid ->
+            lager:info("killing task pool"),
+            catch exit(Pid, kill);
+        _ ->
+            ok
+    end,
+    {TaskId, {ok, []}} = receive X -> X end.
+
+%% 1) Create a task
+%% 2) Stop the task,
+task_stop_normal(Config) ->
+    TaskId = ?config(taskid, Config),
+    Opaque = 1,
+    F = fun(1) ->
+        lager:info("~p: sleeping!", [TaskId]),
+        timer:sleep(timer:seconds(3)),
+        lager:info("~p: woke up!", [TaskId]),
+        {continue, 2};
+    (Term) ->
+        {ok, Term}
+    end,
+    {ok, TaskId} = task_pool_test:run(TaskId, Opaque, F),
+    lager:info("stopping task ~p", [TaskId]),
+    ok = task_pool_test:stop(TaskId),
     receive
-        {TaskId, Result} ->
-            Result
+        {TaskId, shutdown} ->
+            lager:info("~p was shutdown successfully", [TaskId]);
+        {TaskId, {ok, 2}} ->
+            lager:info("~p finished and was not shut down", [TaskId])
     end.

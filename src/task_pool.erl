@@ -72,14 +72,35 @@
     ignore |
     {error, Reason :: term()}.
 
-start_link(#pool_cfg{} = Config) ->
-    gen_server:start_link(?MODULE, Config#pool_cfg{sup = self()}, []).
+start_link(#pool_cfg{id = Proc} = Config) when is_atom(Proc) ->
+    gen_server:start_link({local, Proc}, ?MODULE, Config#pool_cfg{sup = self()}, []).
 
-run(Pid, Id, Opaque, Fun) ->
-    gen_server:call(Pid, #taskreq{id = Id, opaque = Opaque, callback = Fun}, infinity).
+run(Proc, Id, Opaque, Fun) ->
+    Request = #taskreq{id = Id, opaque = Opaque, callback = Fun},
+    call(Proc, Request, infinity).
 
-stop(Pid, Id) ->
-    gen_server:call(Pid, #taskstopreq{id = Id}, infinity).
+stop(Proc, Id) ->
+    Request = #taskstopreq{id = Id},
+    gen_server:cast(Proc, Request).
+
+-define(DEFAULT_RETRIES, 5).
+-define(DEFAULT_FREQUENCY, 750).
+
+call(Proc, Req, Timeout) ->
+    call(Proc, Req, Timeout, ?DEFAULT_RETRIES, undefined).
+
+call(_Proc, _Req, _Timeout, 0, {killed, _}) ->
+    {error, killed};
+call(_Proc, _Req, _Timeout, 0, Return) ->
+    Return;
+call(Proc, Req, Timeout, Retries, _Return) ->
+    case catch gen_server:call(Proc, Req, Timeout) of
+        {'EXIT', Error} ->
+            timer:sleep(?DEFAULT_FREQUENCY),
+            call(Proc, Req, Timeout, Retries - 1, Error);
+        Result ->
+            Result
+    end.
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -122,6 +143,9 @@ init(#pool_cfg{id = Id, sup = Sup, maxws = MaxWs}) ->
     {stop, Reason :: term(), Reply :: term(), NewState :: #state{}} |
     {stop, Reason :: term(), NewState :: #state{}}.
 
+handle_call(#taskreq{} = Req, From, #state{sup = undefined} = State) ->
+    self() ! {'$gen_call', From, Req},
+    {noreply, State};
 handle_call(#taskreq{id = Id, callback = F, opaque = Opaque}, {Pid, _Tag}, #state{maxws = MaxWs, ws = Ws, runq = RunQ} = State) ->
     #state{ets = Ets, sup = Sup} = State,
     case ets:lookup(Ets, Id) of
@@ -135,26 +159,10 @@ handle_call(#taskreq{id = Id, callback = F, opaque = Opaque}, {Pid, _Tag}, #stat
                 false ->
                     {reply, {ok, Id}, State#state{runq = RunQ + 1}}
             end;
+        [#task{caller = Pid}] ->
+            {reply, {ok, Id}, State};
         [#task{}] ->
             {reply, {error, eexist}, State}
-    end;
-handle_call(#taskstopreq{id = Id}, _From, #state{ets = Ets, sup = Sup} = State) ->
-    case ets:lookup(Ets, Id) of
-        [] ->
-            {reply, {error, enoent}, State};
-        [#task{state = Pid}] when is_pid(Pid) ->
-            %% Stop the process and remove its ets entry
-            case supervisor:terminate_child(Sup, Id) of
-                ok ->
-                    ets:delete(Ets, Id);
-                _Error ->
-                    ok
-            end,
-            {reply, ok, State};
-        [#task{caller = Pid, state = queued}] ->
-            ets:delete(Ets, Id),
-            Pid ! {Id, canceled},
-            {reply, ok, State}
     end;
 handle_call(_Request, _From, State) ->
     {reply, {error, einval}, State}.
@@ -198,6 +206,17 @@ handle_cast({init, Parent}, #state{id = Id, ets = Ets} = State) ->
     {RunQ, Ws} = ets:foldl(F, {0, 0}, Ets),
 
     {noreply, State#state{sup = Child, ws = Ws, runq = RunQ}};
+handle_cast(#taskstopreq{id = Id}, #state{ets = Ets, sup = Sup} = State) ->
+    case ets:lookup(Ets, Id) of
+        [#task{caller = Pid, state = Worker}] when is_pid(Worker) ->
+            supervisor:terminate_child(Sup, Worker);
+        [#task{caller = Pid, state = queued}] ->
+            Pid ! {Id, shutdown},
+            ets:delete(Ets, Id);
+        _ ->
+            ok
+    end,
+    {noreply, State};
 handle_cast(_Request, State) ->
     {noreply, State}.
 
@@ -250,7 +269,7 @@ handle_info(_Info, State) ->
 terminate(normal, _State) ->
     ok;
 terminate(Reason, State) ->
-    lager:error("died with ~p in state ~p", [Reason, State]).
+    lager:error("~p died with ~p in state ~p", [self(), Reason, State]).
 
 %%--------------------------------------------------------------------
 %% @private
