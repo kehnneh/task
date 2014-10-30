@@ -163,7 +163,7 @@ terminate(shutdown, State) ->
     terminate(normal, State#state{opaque = shutdown});
 terminate(Reason, #state{ets = Ets, id = Id, caller = Pid, opaque = Opaque}) ->
     lager:debug("Task ~p shutdown: ~p", [Id, Reason]),
-    case deliver(Pid, {Id, Opaque}) of
+    case deliver(Pid, #taskret{id = Id, opaque = Opaque}) of
         ok ->
             ets:delete(Ets, Id);
         noconnect ->
@@ -189,13 +189,30 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-deliver(Pid, Msg) ->
-    try erlang:monitor(process, Pid) of
+deliver(Process, Msg) ->
+    try erlang:monitor(process, Process) of
         Mref ->
-            Ret = (catch erlang:send(Pid, Msg, [noconnect])),
+            Ret = (catch erlang:send(Process, Msg, [noconnect])),
             erlang:demonitor(Mref, [flush]),
             Ret
     catch
         error:_ ->
-            noconnect
+            Node = get_node(Process),
+            monitor_node(Node, true),
+            receive
+                {nodedown, Node} ->
+                    monitor_node(Node, false),
+                    noconnect
+            after 0 ->
+                Process ! Msg,
+                ok
+            end
+    end.
+
+get_node(Process) ->
+    case Process of
+        {_S, N} when is_atom(N) ->
+            N;
+        _ when is_pid(Process) ->
+            node(Process)
     end.

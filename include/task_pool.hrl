@@ -11,12 +11,13 @@
 -ifndef(task_pool).
 -define(task_pool, true).
 
--record(pool_cfg, {
-    id = undefined :: term(),
+-record(cfg_pool, {
+    id = undefined :: atom(),
 
-    %% the user of pool_cfg is typically a
+    %% the user of cfg_pool is typically a
     %% supervisor, the task supervisor for this
-    %% pool will be a child of it
+    %% pool will be another of the supervisor's
+    %% children
     sup :: pid(),
     maxws = 1000 :: non_neg_integer()
 }).

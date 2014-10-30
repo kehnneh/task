@@ -19,4 +19,9 @@
     state :: queued | pid() | done
 }).
 
+-record(taskret, {
+    id :: term(),
+    opaque :: term()
+}).
+
 -endif. %% task

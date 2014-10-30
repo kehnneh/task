@@ -43,7 +43,7 @@
 
 -record(state, {
     %% The pool id is also the table id!
-    id          :: term(),
+    id          :: atom(),
     ets         :: ets:tid(),
 
     %% supervisor
@@ -67,40 +67,40 @@
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec start_link(#pool_cfg{}) ->
+-spec start_link(#cfg_pool{}) ->
     {ok, Pid :: pid()} |
     ignore |
     {error, Reason :: term()}.
 
-start_link(#pool_cfg{id = Proc} = Config) when is_atom(Proc) ->
-    gen_server:start_link({local, Proc}, ?MODULE, Config#pool_cfg{sup = self()}, []).
+start_link(#cfg_pool{id = Proc} = Config) when is_atom(Proc) ->
+    gen_server:start_link({local, Proc}, ?MODULE, Config#cfg_pool{sup = self()}, []).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Runs a task
+%%
+%% @end
+%%--------------------------------------------------------------------
+-spec run(Proc :: pid(), Id :: term(), Opaque :: term(), Fun :: fun()) ->
+    {ok, Id :: term()} |
+    {error, Reason :: term()}.
 
 run(Proc, Id, Opaque, Fun) ->
     Request = #taskreq{id = Id, opaque = Opaque, callback = Fun},
-    call(Proc, Request, infinity).
+    gen_server:call(Proc, Request, infinity).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Asynchronously stops a task
+%%
+%% @end
+%%--------------------------------------------------------------------
+-spec stop(Proc :: pid(), Id :: term()) ->
+    ok.
 
 stop(Proc, Id) ->
     Request = #taskstopreq{id = Id},
     gen_server:cast(Proc, Request).
-
--define(DEFAULT_RETRIES, 5).
--define(DEFAULT_FREQUENCY, 750).
-
-call(Proc, Req, Timeout) ->
-    call(Proc, Req, Timeout, ?DEFAULT_RETRIES, undefined).
-
-call(_Proc, _Req, _Timeout, 0, {killed, _}) ->
-    {error, killed};
-call(_Proc, _Req, _Timeout, 0, Return) ->
-    Return;
-call(Proc, Req, Timeout, Retries, _Return) ->
-    case catch gen_server:call(Proc, Req, Timeout) of
-        {'EXIT', Error} ->
-            timer:sleep(?DEFAULT_FREQUENCY),
-            call(Proc, Req, Timeout, Retries - 1, Error);
-        Result ->
-            Result
-    end.
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -123,9 +123,15 @@ call(Proc, Req, Timeout, Retries, _Return) ->
     {stop, Reason :: term()} |
     ignore.
 
-init(#pool_cfg{id = Id, sup = Sup, maxws = MaxWs}) ->
-    gen_server:cast(self(), {init, Sup}),
+init(#cfg_pool{id = Id}) when not is_atom(Id) ->
+    {stop, {error, {badarg, {id, Id}}}};
+init(#cfg_pool{sup = Sup}) when not is_pid(Sup) ->
+    {stop, {error, {badarg, {sup, Sup}}}};
+init(#cfg_pool{maxws = MaxWs}) when not is_integer(MaxWs); MaxWs =< 0 ->
+    {stop, {error, {badarg, {maxws, MaxWs}}}};
+init(#cfg_pool{id = Id, sup = Sup, maxws = MaxWs}) ->
     {ok, Ets} = task_table_server:acquire_table(Id, [public, set, {keypos, #task.id}]),
+    gen_server:cast(self(), {init, Sup}),
     {ok, #state{id = Id, ets = Ets, maxws = MaxWs}}.
 
 %%--------------------------------------------------------------------
@@ -143,11 +149,8 @@ init(#pool_cfg{id = Id, sup = Sup, maxws = MaxWs}) ->
     {stop, Reason :: term(), Reply :: term(), NewState :: #state{}} |
     {stop, Reason :: term(), NewState :: #state{}}.
 
-handle_call(#taskreq{} = Req, From, #state{sup = undefined} = State) ->
-    %% We haven't initialized yet, send ourselves a message to do this again
-    self() ! {'$gen_call', From, Req},
-    {noreply, State};
-handle_call(#taskreq{id = Id, callback = F, opaque = Opaque}, {Pid, _Tag}, #state{maxws = MaxWs, ws = Ws, runq = RunQ} = State) ->
+handle_call(#taskreq{id = Id, callback = F, opaque = Opaque}, {Pid, _Tag}, #state{id = PoolId, maxws = MaxWs, ws = Ws, runq = RunQ} = State)
+  when is_function(F, 1) ->
     #state{ets = Ets, sup = Sup} = State,
     case ets:lookup(Ets, Id) of
         [] ->
@@ -155,9 +158,17 @@ handle_call(#taskreq{id = Id, callback = F, opaque = Opaque}, {Pid, _Tag}, #stat
             ets:insert(Ets, Task),
             case MaxWs > Ws of
                 true ->
-                    start_task(Sup, Ets, Id),
-                    {reply, {ok, Id}, State#state{ws = Ws + 1}};
+                    case supervisor:start_child(Sup, [{Ets, Id}]) of
+                        {ok, Pid} ->
+                            erlang:monitor(process, Pid),
+                            lager:debug("Task Pool ~p started task ~p at ~p", [PoolId, Id, Pid]),
+                            {reply, {ok, Id}, State#state{ws = Ws + 1}};
+                        Error ->
+                            lager:warning("Task Pool ~p couldn't start task ~p: ~p", [PoolId, Id, Error]),
+                            {reply, Error, State}
+                    end;
                 false ->
+                    lager:debug("Task Pool ~p queued task ~p", [PoolId, Id]),
                     {reply, {ok, Id}, State#state{runq = RunQ + 1}}
             end;
         [#task{caller = Pid}] ->
@@ -184,40 +195,46 @@ handle_cast({init, Parent}, #state{id = Id, ets = Ets} = State) ->
     %% This clause must only be entered as a result of init/1
 
     %% Acquire task process supervisor
-    ChildSpec = {erlang:phash2(Id), {task_sup, start_link, []}, transient, infinity, supervisor, [task_sup]},
-    Child = case supervisor:start_child(Parent, ChildSpec) of
+    SupId = list_to_atom(atom_to_list(Id) ++ "_sup"),
+    ChildSpec = {SupId, {task_sup, start_link, []}, transient, infinity, supervisor, [task_sup]},
+    Sup = case supervisor:start_child(Parent, ChildSpec) of
                 {ok, Pid} ->
                     Pid;
                 {error, {already_started, Pid}} ->
                     Pid
             end,
+    lager:debug("Task Pool ~p supervisor running at ~p", [Sup]),
 
     %% Scan task table and calibrate our working set and queued counts
-    F = fun(#task{state = queued}, {RunQ, Ws}) ->
-        {RunQ + 1, Ws};
+    F = fun(#task{state = queued}, {Ws, RunQ}) ->
+        {Ws, RunQ + 1};
     (#task{state = P}, {RunQ, Ws}) when is_pid(P) ->
         erlang:monitor(process, P),
-        {RunQ, Ws + 1};
+        {Ws + 1, RunQ};
     (#task{}, Acc) ->
         Acc;
     (Entry, Acc) ->
         lager:warning("Found ~p in task pool table ~p", [Entry, Id]),
         Acc
     end,
-    {RunQ, Ws} = ets:foldl(F, {0, 0}, Ets),
+    {Ws, RunQ} = ets:foldl(F, {0, 0}, Ets),
+    lager:debug("Task Pool ~p initialized with ~p runners and ~p queued tasks", [Id, Ws, RunQ]),
 
-    {noreply, State#state{sup = Child, ws = Ws, runq = RunQ}};
-handle_cast(#taskstopreq{id = Id}, #state{ets = Ets, sup = Sup} = State) ->
+    {noreply, State#state{sup = Sup, ws = Ws, runq = RunQ}};
+handle_cast(#taskstopreq{id = Id}, #state{id = PoolId, ets = Ets, sup = Sup, runq = RunQ} = State) ->
     case ets:lookup(Ets, Id) of
-        [#task{caller = Pid, state = Worker}] when is_pid(Worker) ->
-            supervisor:terminate_child(Sup, Worker);
-        [#task{caller = Pid, state = queued}] ->
-            Pid ! {Id, shutdown},
-            ets:delete(Ets, Id);
+        [#task{state = Pid}] when is_pid(Pid) ->
+            supervisor:terminate_child(Sup, Pid),
+            lager:debug("Task Pool ~p terminated task ~p", [PoolId, Id]),
+            {noreply, State};
+        [#task{caller = Caller, state = queued}] ->
+            unqueue_task(Ets, Id, Caller),
+            lager:debug("Task Pool ~p removed task ~p from queue", [PoolId, Id]),
+            {noreply, State#state{runq = RunQ - 1}};
         _ ->
-            ok
-    end,
-    {noreply, State};
+            lager:debug("Task Pool ~p cannot stop task ~p", [PoolId, Id]),
+            {noreply, State}
+    end;
 handle_cast(_Request, State) ->
     {noreply, State}.
 
@@ -236,20 +253,25 @@ handle_cast(_Request, State) ->
     {noreply, NewState :: #state{}, timeout() | hibernate} |
     {stop, Reason :: term(), NewState :: #state{}}.
 
-handle_info({'DOWN', _Ref, _Type, _Pid, _Reason}, State) ->
-    #state{ets = Ets, sup = Sup, ws = Ws, runq = RunQ} = State,
-    case RunQ > 0 of
-        true ->
-            case ets:match_object(Ets, #task{id = '_', opaque = '_', callback = '_', caller = '_', state = queued}, 1) of
-                '$end_of_table' ->
-                    ok;
-                {[#task{id = Id}], _Continuation} ->
-                    start_task(Sup, Ets, Id)
-            end,
+%% If a task dies when the pool has tasks queued, start a new
+%% task, if able
+handle_info({'DOWN', _, _, _, _} = Msg, #state{runq = RunQ} = State) when RunQ > 0 ->
+    #state{id = Id, ets = Ets, sup = Sup} = State,
+    Pattern = #task{id = '_', opaque = '_', callback = '_', caller = '_', state = queued},
+    {[#task{id = TaskId, caller = Caller}], _Continuation} = ets:match_object(Ets, Pattern, 1),
+    case catch supervisor:start_child(Sup, [{Ets, TaskId}]) of
+        {ok, Pid} ->
+            lager:debug("Task Pool ~p started task ~p at ~p", [Id, TaskId, Pid]),
+            erlang:monitor(process, Pid),
             {noreply, State#state{runq = RunQ - 1}};
-        false ->
-            {noreply, State#state{ws = Ws - 1}}
+        {'EXIT', Reason} ->
+            lager:warning("Task Pool ~p couldn't start task ~p: ~p", [Id, TaskId, Reason]),
+            unqueue_task(Ets, TaskId, Caller),
+            handle_info(Msg, State#state{runq = RunQ - 1})
     end;
+handle_info({'DOWN', _, _, _, _}, #state{id = Id, ws = Ws} = State) ->
+    lager:debug("Task Pool ~p has no tasks left to queue", [Id]),
+    {noreply, State#state{ws = Ws - 1}};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -267,10 +289,8 @@ handle_info(_Info, State) ->
 -spec terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()), State :: #state{}) ->
     term().
 
-terminate(normal, _State) ->
-    ok;
-terminate(Reason, State) ->
-    lager:error("~p died with ~p in state ~p", [self(), Reason, State]).
+terminate(_Reason, _State) ->
+    ok.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -291,6 +311,17 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-start_task(Sup, Ets, Id) ->
-    {ok, Pid} = supervisor:start_child(Sup, [{Ets, Id}]),
-    erlang:monitor(process, Pid).
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Removes a queued task from the ETS table and alerts its caller
+%% of its shutdown
+%%
+%% @end
+%%--------------------------------------------------------------------
+-spec unqueue_task(Ets :: ets:tid(), Id :: term(), Pid :: pid()) ->
+    true.
+
+unqueue_task(Ets, Id, Pid) ->
+    Pid ! {Id, shutdown},
+    ets:delete(Ets, Id).

@@ -30,7 +30,7 @@ all() ->
 
 groups() ->
     [{master,
-      [parallel, {repeat, 2}],
+      [parallel],
       [{group, batch}]},
      {batch,
       [parallel],
@@ -61,6 +61,8 @@ init_per_group(_, Config) ->
 end_per_group(_, _Config) ->
     ok.
 
+init_per_testcase(test_pool_queue, Config) ->
+    Config;
 init_per_testcase(_, Config) ->
     TaskId = make_ref(),
     [{taskid, TaskId}] ++ Config.
@@ -112,3 +114,18 @@ task_stop_normal(Config) ->
         {TaskId, {ok, 2}} ->
             lager:info("~p finished and was not shut down", [TaskId])
     end.
+
+%% test_pool_queue(Config) ->
+%%     Ets = ets:new(derp, [private, set]),
+%%     Opaque = [],
+%%     F = fun(Term) ->
+%%         timer:sleep(timer:seconds(3)),
+%%         {ok, Term}
+%%     end,
+%%     G = fun(TaskId) ->
+%%         {ok, TaskId} = task_pool_test:run(TaskId, [], F),
+%%         ets:insert(Ets, {TaskId, undefined})
+%%     end,
+%%     Seq = [make_ref() || _ <- lists:seq(1, 20)]
+%%     lists:foreach
+%%     ets:delete(Ets).

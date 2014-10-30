@@ -18,7 +18,7 @@
 ]).
 
 start_link() ->
-    PoolCfg = #pool_cfg{id = ?MODULE, maxws = 10, sup = self()},
+    PoolCfg = #cfg_pool{id = ?MODULE, maxws = 10, sup = self()},
     task_pool:start_link(PoolCfg).
 
 run(Id, Opaque, Fun) ->
