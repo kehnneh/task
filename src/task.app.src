@@ -13,7 +13,8 @@
     {applications, [
         kernel,
         stdlib,
-        lager
+        lager,
+        table_mon
     ]},
     {mod, {task_app, []}},
     {env, []}

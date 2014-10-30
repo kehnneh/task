@@ -130,7 +130,7 @@ init(#cfg_pool{sup = Sup}) when not is_pid(Sup) ->
 init(#cfg_pool{maxws = MaxWs}) when not is_integer(MaxWs); MaxWs =< 0 ->
     {stop, {error, {badarg, {maxws, MaxWs}}}};
 init(#cfg_pool{id = Id, sup = Sup, maxws = MaxWs}) ->
-    {ok, Ets} = task_table_server:acquire_table(Id, [public, set, {keypos, #task.id}]),
+    {ok, Ets} = task_ets_mon:acquire_table(Id, [public, set, {keypos, #task.id}]),
     gen_server:cast(self(), {init, Sup}),
     {ok, #state{id = Id, ets = Ets, maxws = MaxWs}}.
 

@@ -62,12 +62,12 @@ init([]) ->
     SupFlags = {RestartStrategy, MaxRestarts, MaxSecondsBetweenRestarts},
 
     TableServer = {
-        task_table_server,
-        {task_table_server, start_link, []},
+        task_table_mon,
+        {table_mon, start_link, [?TASK_TABLE_MON]},
         permanent,
         infinity,
         worker,
-        [task_table_server]
+        [table_mon]
     },
 
     {ok, {SupFlags, [TableServer]}}.
